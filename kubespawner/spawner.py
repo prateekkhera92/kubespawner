@@ -224,8 +224,6 @@ class KubeSpawner(Spawner):
         if self.port == 0:
             # Our default port is 8888
             self.port = 8888
-        # The attribute needs to exist, even though it is unset to start with
-        self._start_future = None
 
     def _set_k8s_client_configuration(self):
         # The actual (singleton) Kubernetes client will be created
@@ -915,18 +913,13 @@ class KubeSpawner(Spawner):
     )
 
     allow_privilege_escalation = Bool(
-        False,
-        allow_none=True,
+        True,
         config=True,
         help="""
         Controls whether a process can gain more privileges than its parent process.
 
-        When set to False (the default), the primary user visible effect is that
-        setuid binaries (like sudo) will no longer work.
-
-        When set to None, the defaults for the cluster are respected.
-
         This bool directly controls whether the no_new_privs flag gets set on the container
+        process.
 
         AllowPrivilegeEscalation is true always when the container is:
         1) run as Privileged OR 2) has CAP_SYS_ADMIN.
@@ -2174,21 +2167,12 @@ class KubeSpawner(Spawner):
 
         break_while_loop = False
         while True:
-            # This logic avoids a race condition. self._start() will invoke
-            # self.start() and almost directly set self._start_future. But,
-            # progress() will be invoked via self.start(), so what happen first?
-            # Due to this, the logic below is to avoid making an assumption that
-            # self._start_future was set before this function was called.
-            if start_future is None and self._start_future:
-                start_future = self._start_future
-
-            # Ensure we capture all events by inspecting events a final time
-            # after the start_future signal has fired, we could have been in
-            # .sleep() and missed something.
-            if start_future and start_future.done():
+            # Ensure we always capture events following the start_future
+            # signal has fired.
+            if start_future.done():
                 break_while_loop = True
-
             events = self.events
+
             len_events = len(events)
             if next_event < len_events:
                 for i in range(next_event, len_events):
@@ -2800,36 +2784,36 @@ class KubeSpawner(Spawner):
         """
         return {'profile': formdata.get('profile', [None])[0]}
 
-    async def _load_profile(self, slug):
+    async def _load_profile(self, slug, kubespawner_override):
         """Load a profile by name
 
         Called by load_user_options
         """
 
         # find the profile
-        default_profile = self._profile_list[0]
-        for profile in self._profile_list:
-            if profile.get('default', False):
-                # explicit default, not the first
-                default_profile = profile
+        # default_profile = self._profile_list[0]
+        # for profile in self._profile_list:
+        #     if profile.get('default', False):
+        #         # explicit default, not the first
+        #         default_profile = profile
 
-            if profile['slug'] == slug:
-                break
-        else:
-            if slug:
-                # name specified, but not found
-                raise ValueError(
-                    "No such profile: %s. Options include: %s"
-                    % (slug, ', '.join(p['slug'] for p in self._profile_list))
-                )
-            else:
-                # no name specified, use the default
-                profile = default_profile
+        #     if profile['slug'] == slug:
+        #         break
+        # else:
+        #     if slug:
+        #         # name specified, but not found
+        #         raise ValueError(
+        #             "No such profile: %s. Options include: %s"
+        #             % (slug, ', '.join(p['slug'] for p in self._profile_list))
+        #         )
+        #     else:
+        #         # no name specified, use the default
+        #         profile = default_profile
 
-        self.log.debug(
-            "Applying KubeSpawner override for profile '%s'", profile['display_name']
-        )
-        kubespawner_override = profile.get('kubespawner_override', {})
+        # self.log.debug(
+        #     "Applying KubeSpawner override for profile '%s'", profile['display_name']
+        # )
+        # kubespawner_override = profile.get('kubespawner_override', {})
         for k, v in kubespawner_override.items():
             if callable(v):
                 v = v(self)
@@ -2843,7 +2827,7 @@ class KubeSpawner(Spawner):
     # set of recognised user option keys
     # used for warning about ignoring unrecognised options
     _user_option_keys = {
-        'profile',
+        'profile','kubespawner_override'
     }
 
     def _init_profile_list(self, profile_list):
@@ -2859,7 +2843,6 @@ class KubeSpawner(Spawner):
 
         This can be set via POST to the API or via options_from_form
 
-        Only supported argument by default is 'profile'.
         Override in subclasses to support other options.
         """
 
@@ -2872,8 +2855,10 @@ class KubeSpawner(Spawner):
             self._profile_list = self._init_profile_list(profile_list)
 
         selected_profile = self.user_options.get('profile', None)
+        kubespawner_override = self.user_options.get('kubespawner_override', None)
+
         if self._profile_list:
-            await self._load_profile(selected_profile)
+            await self._load_profile(selected_profile,kubespawner_override)
         elif selected_profile:
             self.log.warning(
                 "Profile %r requested, but profiles are not enabled", selected_profile
